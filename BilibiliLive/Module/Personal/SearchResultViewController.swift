@@ -11,9 +11,15 @@ import UIKit
 
 class SearchResultViewController: UIViewController {
     var collectionView: UICollectionView!
-    var dataSource: UICollectionViewDiffableDataSource<SearchList, AnyHashable>!
-    var currentSnapshot: NSDiffableDataSourceSnapshot<SearchList, AnyHashable>!
+    var dataSource: UICollectionViewDiffableDataSource<SearchList, Item>!
+    var currentSnapshot: NSDiffableDataSourceSnapshot<SearchList, Item>!
     static let titleElementKind = "titleElementKind"
+
+    enum Item: Hashable {
+        case video(SearchResult.Video)
+        case bangumi(SearchResult.Bangumi)
+        case user(SearchResult.User)
+    }
 
     @Published var searchText: String = ""
     var cancellable: Cancellable?
@@ -40,6 +46,7 @@ class SearchResultViewController: UIViewController {
                 WebRequest.requestSearchResult(key: key) { [weak self] searchResult in
                     guard let self = self else { return }
                     currentSnapshot.deleteAllItems()
+                    dataSource.apply(currentSnapshot)
 
                     let defaultHeight = NSCollectionLayoutDimension.fractionalWidth(Settings.displayStyle == .large ? 0.26 : 0.2)
                     for section in searchResult.result {
@@ -47,19 +54,19 @@ class SearchResultViewController: UIViewController {
                         case let .video(data):
                             let list = SearchList(title: "视频", height: defaultHeight, scrollingBehavior: .continuous)
                             currentSnapshot.appendSections([list])
-                            currentSnapshot.appendItems(data, toSection: list)
+                            currentSnapshot.appendItems(data.map { .video($0) }, toSection: list)
                         case let .bangumi(data):
                             let list = SearchList(title: "番剧", height: defaultHeight, scrollingBehavior: .continuous)
                             currentSnapshot.appendSections([list])
-                            currentSnapshot.appendItems(data, toSection: list)
+                            currentSnapshot.appendItems(data.map { .bangumi($0) }, toSection: list)
                         case let .movie(data):
                             let list = SearchList(title: "影视", height: defaultHeight, scrollingBehavior: .none)
                             currentSnapshot.appendSections([list])
-                            currentSnapshot.appendItems(data, toSection: list)
+                            currentSnapshot.appendItems(data.map { .bangumi($0) }, toSection: list)
                         case let .user(data):
                             let list = SearchList(title: "用户", height: .estimated(140), scrollingBehavior: .continuous)
                             currentSnapshot.appendSections([list])
-                            currentSnapshot.appendItems(data, toSection: list)
+                            currentSnapshot.appendItems(data.map { .user($0) }, toSection: list)
                         case .none:
                             break
                         }
@@ -124,7 +131,7 @@ extension SearchResultViewController {
     }
 
     private func configureDataSource() {
-        let displayCell = UICollectionView.CellRegistration<FeedCollectionViewCell, DisplayData> {
+        let displayCell = UICollectionView.CellRegistration<FeedCollectionViewCell, any DisplayData> {
             $0.setup(data: $2)
         }
         let userCell = UICollectionView.CellRegistration<UpCell, SearchResult.User> {
@@ -132,14 +139,15 @@ extension SearchResultViewController {
             $0.despLabel.text = $2.usign
             $0.imageView.kf.setImage(with: $2.upic.addSchemeIfNeed(), options: [.processor(DownsamplingImageProcessor(size: CGSize(width: 80, height: 80))), .processor(RoundCornerImageProcessor(radius: .widthFraction(0.5))), .cacheSerializer(FormatIndicatedCacheSerializer.png)])
         }
-        dataSource = UICollectionViewDiffableDataSource<SearchList, AnyHashable>(collectionView: collectionView) {
+        dataSource = UICollectionViewDiffableDataSource<SearchList, Item>(collectionView: collectionView) {
             collectionView, indexPath, item in
-            if let item = item as? any DisplayData {
+            switch item {
+            case let .video(item):
                 return collectionView.dequeueConfiguredReusableCell(using: displayCell, for: indexPath, item: item)
-            } else if let item = item as? SearchResult.User {
+            case let .bangumi(item):
+                return collectionView.dequeueConfiguredReusableCell(using: displayCell, for: indexPath, item: item)
+            case let .user(item):
                 return collectionView.dequeueConfiguredReusableCell(using: userCell, for: indexPath, item: item)
-            } else {
-                fatalError("Unknown item type")
             }
         }
 
@@ -157,7 +165,7 @@ extension SearchResultViewController {
             )
         }
 
-        currentSnapshot = NSDiffableDataSourceSnapshot<SearchList, AnyHashable>()
+        currentSnapshot = NSDiffableDataSourceSnapshot<SearchList, Item>()
     }
 }
 
@@ -165,18 +173,16 @@ extension SearchResultViewController: UICollectionViewDelegate {
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard let data = dataSource.itemIdentifier(for: indexPath) else { return }
         switch data {
-        case let data as SearchResult.Video:
+        case let .video(data):
             let detailVC = VideoDetailViewController.create(aid: data.aid, cid: 0)
             detailVC.present(from: self)
-        case let data as SearchResult.Bangumi:
+        case let .bangumi(data):
             let detailVC = VideoDetailViewController.create(seasonId: data.season_id)
             detailVC.present(from: self)
-        case let data as SearchResult.User:
+        case let .user(data):
             let upSpaceVC = UpSpaceViewController()
             upSpaceVC.mid = data.mid
             present(upSpaceVC, animated: true)
-        default:
-            break
         }
     }
 
@@ -266,6 +272,7 @@ struct SearchResult: Decodable, Hashable {
             case .video:
                 var video = try container.decode([Video].self, forKey: .data)
                 video.indices.forEach({ video[$0].title = video[$0].title.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil) })
+                video = Array(Set(video))
                 self = .video(video)
             case .media_bangumi:
                 var bangumi = try container.decode([Bangumi].self, forKey: .data)
@@ -274,6 +281,7 @@ struct SearchResult: Decodable, Hashable {
                     break
                 }
                 bangumi.indices.forEach({ bangumi[$0].title = bangumi[$0].title.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil) })
+                bangumi = Array(Set(bangumi))
                 self = .bangumi(bangumi)
             case .media_ft:
                 var bangumi = try container.decode([Bangumi].self, forKey: .data)
@@ -282,13 +290,15 @@ struct SearchResult: Decodable, Hashable {
                     break
                 }
                 bangumi.indices.forEach({ bangumi[$0].title = bangumi[$0].title.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil) })
+                bangumi = Array(Set(bangumi))
                 self = .movie(bangumi)
             case .bili_user:
-                let user = try container.decode([User].self, forKey: .data)
+                var user = try container.decode([User].self, forKey: .data)
                 if user.count == 0 {
                     self = .none
                     break
                 }
+                user = Array(Set(user))
                 self = .user(user)
             case .none:
                 self = .none
